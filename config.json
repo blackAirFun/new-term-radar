@@ -1,0 +1,36 @@
+{
+  "lang": "zh",
+
+  "x_accounts": {"labs": [], "bloggers": []},
+
+  "sitemaps": {
+    "ai-bot.cn":     {"index": "https://ai-bot.cn/sitemap.xml", "pause": 3},
+    "toolify":       {"index": "https://www.toolify.ai/sitemap.xml", "shards": "sitemap_tools_(1[6-9]|[2-9]\\d)\\.xml$", "pause": 5, "strip_locale": true},
+    "aixploria":     {"index": "https://www.aixploria.com/sitemap.xml", "shards": "sitemap-posttype-post\\.20(2[6-9]|[3-9]\\d)\\d{2}\\.xml$", "pause": 2},
+    "opentools":     {"index": "https://opentools.ai/sitemap.xml", "shards": "/(tools|llms|mcp)-sitemap\\.xml$", "pause": 2},
+    "dang":          {"index": "https://dang.ai/sitemap.xml", "pause": 2},
+    "aitoptools":    {"index": "https://aitoptools.com/sitemap.xml", "pause": 2},
+    "futurepedia":   {"index": "https://www.futurepedia.io/sitemap_tools.xml", "pause": 2},
+    "clipfly":       {"index": "https://www.clipfly.ai/sitemaps/en.xml", "pause": 2, "strip_locale": true},
+    "glama":         {"index": "https://glama.ai/sitemap.xml", "shards": "/(mcp-servers|mcp-remote-servers)/\\d+\\.xml$|blog-posts", "pause": 2},
+    "mcp.so":        {"index": "https://mcp.so/sitemap.xml", "shards": "section=(servers|agents|cli|clients|posts)\\b", "pause": 2}
+  },
+
+  "topics": {
+    "AI 视频": "\\bvideos?\\b|animat|avatar|lip ?sync|seedance|\\bveo\\b|\\bsora\\b|kling|hailuo|vidu|wan\\b|视频",
+    "AI 图像": "\\bimage|photo|\\bart\\b|draw|midjourney|flux|stable ?diffusion|nano ?banana|图像|图片|绘画",
+    "AI 编程": "\\bcod(e|ing)|\\bdev\\b|ide\\b|cursor|copilot|agent|mcp|编程|代码",
+    "AI 音频": "\\bvoice|audio|music|speech|tts|song|podcast|语音|音乐",
+    "AI 写作与办公": "writ|ppt|slides|docs?\\b|excel|pdf|resume|写作|办公|简历"
+  },
+
+  "known_terms": [],
+  "stop_words": [],
+
+  "breakout": {"window_days": 14, "min_stars": 300, "velocity_min": 200, "delta_min": 400},
+  "review": {"after_days": 14, "per_day": 0},
+  "usecases": {"per_day": 0},
+  "tutorials": {"max_leads": 0},
+
+  "gsc": {}
+}
