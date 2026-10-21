@@ -21,7 +21,7 @@ name: New-term radar
 
 on:
   schedule:
-    - cron: "0 0,8,16 * * *"   # sources
+    # Free mode: only the daily run, at 01:30 UTC (09:30 Beijing time).
     - cron: "30 1 * * *"       # daily
   workflow_dispatch:
     inputs:
@@ -40,9 +40,11 @@ jobs:
   radar:
     if: vars.RADAR_ENABLED == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
-      COMMAND: ${{ github.event.inputs.command || (github.event.schedule == '30 1 * * *' && 'daily' || 'sources') }}
+      COMMAND: ${{ github.event.inputs.command || 'daily' }}
+      # Free mode: skip every signal that needs a paid key (AIsa, GoAnyAPI, TrustMRR, GSC).
+      RADAR_SKIP: x,newsites,review,judge,usecases,revenue,asks,sellers,tutorials,gsc
     steps:
       - uses: actions/checkout@v4
 
@@ -70,7 +72,7 @@ jobs:
           RADAR_EMAIL_TO: ${{ secrets.RADAR_EMAIL_TO }}
         run: |
           if [ "$COMMAND" = "daily" ]; then
-            python -m radar daily --skip x,hf --out report.md ${RADAR_EMAIL_TO:+--mail}
+            python -m radar daily --skip "$RADAR_SKIP" --out report.md ${RADAR_EMAIL_TO:+--mail}
           else
             python -m radar sources --out report.md ${RADAR_EMAIL_TO:+--mail}
           fi
