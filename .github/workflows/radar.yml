@@ -74,6 +74,16 @@ jobs:
           fi
           if [ -f report.md ]; then cat report.md >> "$GITHUB_STEP_SUMMARY"; fi
 
+      # 公众号草稿：过滤 + 打分 + 改写 + 时间差。失败不影响当天的雷达结果。
+      - name: Edit the day's draft
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          if [ -f report.json ]; then
+            python -m radar.digest --report report.json --state state --out draft || true
+            ls -la draft || true
+          fi
+
       # Telegram instead of mail: the day's highlights and each signal as cards with links, in as
       # many messages as it takes, then the whole report with every table as an HTML file.
       # Skipped when TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set.
@@ -321,4 +331,12 @@ jobs:
             report.json
             state/radar.db
           if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Keep the draft
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: draft-${{ github.run_id }}
+          path: draft/
           retention-days: 30
