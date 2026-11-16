@@ -10,7 +10,7 @@ name: New-term radar
 # (Settings > Secrets and variables > Actions > Variables), add the secret AISA_API_KEY,
 # and commit your config.json (remove it from .gitignore first; it holds no secrets).
 # Optional secrets: GOANYAPI_API_KEY (related queries in the keyword table),
-# RESEND_API_KEY, EMAIL_FROM, RADAR_EMAIL_TO (mail the reports),
+# TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (send the reports to Telegram),
 # GSC_TOKEN_JSON (the Search Console signal).
 #
 # State (state/radar.db and the snapshots) lives in the Actions cache: one entry per
@@ -20,9 +20,8 @@ name: New-term radar
 # about the review's history.
 
 on:
-  schedule:
-    - cron: "0 0,8,16 * * *"   # sources
-    - cron: "30 1 * * *"       # daily
+  # No schedule here: GitHub ran it about six hours late every day. cron-job.org calls the
+  # workflow_dispatch API at 09:17 Beijing time instead.
   workflow_dispatch:
     inputs:
       command:
@@ -40,9 +39,11 @@ jobs:
   radar:
     if: vars.RADAR_ENABLED == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
-      COMMAND: ${{ github.event.inputs.command || (github.event.schedule == '30 1 * * *' && 'daily' || 'sources') }}
+      COMMAND: ${{ github.event.inputs.command || 'daily' }}
+      # Free mode: skip every signal that needs a paid key (AIsa, GoAnyAPI, TrustMRR, GSC).
+      RADAR_SKIP: x,newsites,review,judge,usecases,revenue,asks,sellers,tutorials,gsc,builders,money,sidelights
     steps:
       - uses: actions/checkout@v4
 
@@ -65,16 +66,245 @@ jobs:
           GOANYAPI_API_KEY: ${{ secrets.GOANYAPI_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           GSC_TOKEN_JSON: ${{ secrets.GSC_TOKEN_JSON }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          RADAR_EMAIL_TO: ${{ secrets.RADAR_EMAIL_TO }}
         run: |
+          # Keep only the names this version of the radar knows: older ones reject the rest.
+          SKIP=$(python -c "import os, radar.__main__ as m; print(','.join(s for s in os.environ['RADAR_SKIP'].split(',') if s in m.SKIPPABLE))")
           if [ "$COMMAND" = "daily" ]; then
-            python -m radar daily --skip x,hf --out report.md ${RADAR_EMAIL_TO:+--mail}
+            python -m radar daily --skip "$SKIP" --out report.md
           else
-            python -m radar sources --out report.md ${RADAR_EMAIL_TO:+--mail}
+            python -m radar sources --out report.md
           fi
           if [ -f report.md ]; then cat report.md >> "$GITHUB_STEP_SUMMARY"; fi
+
+      # Telegram instead of mail: the day's highlights and each signal as cards with links, in as
+      # many messages as it takes, then the whole report with every table as an HTML file.
+      # Skipped when TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set.
+      - name: Send the report to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "Telegram skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set"; exit 0
+          fi
+          if [ ! -f report.md ]; then echo "Telegram skipped: no report today"; exit 0; fi
+          python - <<'EOF'
+          import json, os, re, urllib.error, urllib.parse, urllib.request, uuid
+          from datetime import datetime, timedelta, timezone
+          from html import escape
+          from radar import notify
+
+          api = f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}"
+          chat = os.environ["TELEGRAM_CHAT_ID"]
+          day = datetime.now(timezone(timedelta(hours=8)))
+          md = open("report.md", encoding="utf-8").read()
+          try:
+              data = json.load(open("report.json", encoding="utf-8"))
+          except (OSError, ValueError):
+              data = {}
+          topics = json.load(open("config.json", encoding="utf-8")).get("topics", {})
+
+          def e(s):
+              return escape(str(s), quote=False)
+
+          def a(url, text):
+              return f'<a href="{escape(url)}">{e(text)}</a>'
+
+          def block(name):
+              b = data.get(name)
+              return b if isinstance(b, dict) and not b.get("skipped") else {}
+
+          def short(s, n=90):
+              s = re.sub(r"\s+", " ", s or "").strip()
+              s = re.sub(r"\s*Discussion \| Link$", "", s)   # Product Hunt's feed text ends with its two links
+              return s if len(s) <= n else s[:n - 1] + "…"
+
+          def hf_item(example):
+              # "Qwen/Qwen-Image-2.1 (text-to-image, ♥569)": a Space has an sdk where a model has a task.
+              m = re.match(r"(\S+) \(([^,]*), ♥(\d+)\)", example)
+              if not m:
+                  return None
+              hid, kind, likes = m.groups()
+              space = kind in ("gradio", "docker", "static", "streamlit")
+              url = f"https://huggingface.co/{'spaces/' if space else ''}{hid}"
+              return {"id": hid, "kind": kind, "likes": int(likes), "space": space, "url": url}
+
+          def google(term):
+              return "https://www.google.com/search?q=" + urllib.parse.quote(term)
+
+          # --- what each signal found ------------------------------------------------------------
+          repos = sorted(block("breakout").get("repos", []), key=lambda r: -(r.get("velocity") or 0))
+          hf = block("hf").get("terms", [])
+          # MCP directories list servers by registry id ("io.github.someone", "connectors com.x"): not names people search.
+          site_terms = [s for s in block("sitemap").get("terms", [])
+                        if not re.search(r"\bio\.github\b|\bcom\.\w|\bconnectors\b", s["term"])]
+          sites = block("sitemap").get("sites", {})
+          site_new = {s: v for s, v in sites.items() if v.get("new")}
+          leads = data.get("leads", [])
+          feed = block("feed")    # 0.6 and later: Product Hunt, Show HN, OpenRouter, Civitai ...
+          feed_new = {k: v for k, v in feed.get("new", {}).items() if v}
+          FEED_LABEL = {"producthunt": "Product Hunt 新品", "hn": "Show HN 新项目", "openrouter": "OpenRouter 新模型",
+                        "civitai": "Civitai 新模型", "appstore": "App Store 畅销榜新进", "awesome": "awesome 列表新增"}
+
+          def lead_link(lead):
+              if lead.get("repo"):
+                  return f"https://github.com/{lead['repo']}"
+              if isinstance(lead.get("about"), list) and lead["about"] and lead["about"][0]:
+                  return lead["about"][0]     # a feed's lead: [its url, its text]
+              for ex in lead.get("examples", []):
+                  item = hf_item(ex)
+                  if item:
+                      return item["url"]
+              return google(lead["term"])
+
+          # --- today's highlights: the top of each signal in turn, five at most ---------------------
+          def repo_pick(r):
+              return (r["name"], f"https://github.com/{r['repo']}", f"GitHub 日均 +{r['velocity']}⭐",
+                      short(r.get("description"), 50))
+
+          def hf_pick(h):
+              item = next(filter(None, map(hf_item, h.get("examples", []))), None)
+              return (h["term"], item["url"] if item else google(h["term"]), f"HF 热榜新进第 {h.get('rank')}",
+                      item["kind"] if item else "")
+
+          def feed_pick(name):
+              i = feed_new[name][0]
+              return (i["name"], i.get("url") or google(i["name"]), FEED_LABEL.get(name, name), short(i.get("about"), 50))
+
+          hf_ranked = sorted(hf, key=lambda h: h.get("rank", 99))
+          order = [repos[:1], hf_ranked[:1], ["openrouter"] if "openrouter" in feed_new else [],
+                   ["producthunt"] if "producthunt" in feed_new else [], repos[1:2], site_terms[:1], repos[2:3], hf_ranked[1:2]]
+          make = [repo_pick, hf_pick, feed_pick, feed_pick, repo_pick,
+                  lambda s: (s["term"], google(s["term"]), f"导航站 {s['recent']} 个新页面", ""), repo_pick, hf_pick]
+          picks = [f(x) for xs, f in zip(order, make) for x in xs][:5]
+
+          # --- messages: each section is a list of chunks, and a chunk is never cut in two ------------
+          sections = []
+
+          counts = [f"GitHub 爆发 {len(repos)}", f"HF 新上榜 {len(hf)}",
+                    f"导航站新页面 {sum(v['new'] for v in site_new.values())}"]
+          if feed:
+              counts.append(f"新品/新模型 {sum(len(v) for v in feed_new.values())}")
+          head = [f"<b>📡 新词雷达 · {day.month} 月 {day.day} 日</b>", " · ".join(counts), ""]
+          if picks:
+              head.append("🔥 <b>今日重点</b>")
+              for i, (name, url, why, what) in enumerate(picks, 1):
+                  head.append(f"{i}. <b>{a(url, name)}</b>:{e(why)}" + (f",{e(what)}" if what else ""))
+          else:
+              head.append("今天没有新的热点。数据源第一次运行时只记录现状,从下一次起才能对比出新东西。")
+          sections.append(["\n".join(head)])
+
+          def cards(title, items, visible=8):
+              """A section: the first `visible` items as cards, the rest folded into a quote that expands."""
+              if not items:
+                  return
+              chunks = [f"<b>{title}</b>"] + ["\n".join(c) for c in items[:visible]]
+              rest, more = items[visible:15], max(len(items) - 15, 0)
+              while rest and sum(len("\n".join(c)) for c in rest) > 3000:   # one chunk must fit a message
+                  rest, more = rest[:-1], more + 1
+              if rest:
+                  chunks.append("<blockquote expandable>" + "\n\n".join("\n".join(c) for c in rest) + "</blockquote>")
+              if more:
+                  chunks.append(f"……另有 {more} 个,见完整表单")
+              sections.append(chunks)
+
+          cards("🚀 GitHub 爆发项目", [[
+              f"<b>{a('https://github.com/' + r['repo'], r['name'])}</b>" + (" 🆕" if r.get("new") else ""),
+              f"⭐ {r['stars']} · 日均 +{r['velocity']}" + (f" · 比昨天 +{r['delta']}" if r.get("delta") else "")
+              + f" · {r['age_days']} 天",
+          ] + ([e(short(r["description"]))] if r.get("description") else []) for r in repos])
+
+          hf_cards = []
+          for h in hf:
+              items = list(filter(None, map(hf_item, h.get("examples", []))))
+              main = items[0] if items else None
+              card = [f"<b>{a(main['url'] if main else google(h['term']), h['term'])}</b>",
+                      f"热榜第 {h.get('rank')}" + (f" · {e(main['kind'])} · ♥{main['likes']}" if main else "")
+                      + (f" · {h['copies']} 个版本" if h.get("copies", 1) > 1 else "")]
+              if len(items) > 1:      # several versions or a demo: list them; one alone is the link above
+                  card += [a(it["url"], ("Space: " if it["space"] else "") + it["id"]) for it in items[:3]]
+              hf_cards.append(card)
+          cards("🤗 Hugging Face 新上榜", hf_cards)
+
+          site_cards = []
+          if site_terms:
+              site_cards.append(["<b>新页面里反复出现的词</b>"] + [
+                  f"• {a(google(s['term']), s['term'])}:{s['recent']} 个新页面" for s in site_terms[:10]])
+          for site, v in sorted(site_new.items(), key=lambda kv: -kv[1]["new"]):
+              def slug(u):
+                  p = urllib.parse.urlparse(u).path.rstrip("/").rsplit("/", 1)[-1]
+                  return re.sub(r"\.html?$", "", p).replace("-", " ") or u
+              site_cards.append([f"<b>{e(site)}</b> 新收录 {v['new']} 个"] +
+                                [f"• {a(u, short(slug(u), 40))}" for u in v.get("sample", [])[:5]])
+          cards("🧭 导航站新收录", site_cards, visible=6)
+
+          feed_cards = []
+          def feed_line(i):
+              about = re.sub(r"^Show HN:\s*", "", i.get("about") or "")
+              if about.startswith(i["name"]):     # Show HN titles repeat the name: keep only what follows it
+                  about = about[len(i["name"]):].lstrip(" –—-:")
+              link = a(i["url"], i["name"]) if i.get("url") else e(i["name"])
+              return f"• {link}" + (f":{e(short(about, 60))}" if about else "")
+
+          for name, items in feed_new.items():
+              feed_cards.append([f"<b>{e(FEED_LABEL.get(name, name))}</b>"] + [feed_line(i) for i in items[:8]])
+          cards("🆕 新品与新模型", feed_cards, visible=6)
+
+          topic_lines = []
+          for name, pattern in topics.items():
+              hits = [l for l in leads if re.search(pattern, " ".join([l["term"], *l.get("examples", [])]), re.I)]
+              if hits:
+                  topic_lines.append(f"<b>{e(name)}</b>:" + "、".join(a(lead_link(l), short(l["term"], 30)) for l in hits[:12]))
+          if topic_lines:
+              sections.append(["<b>📂 按方向分类</b>"] + topic_lines)
+
+          problems = [f"⚠️ {e(s)}:{e(short(v['error'], 60))}" for s, v in sites.items() if v.get("error")]
+          problems += [f"⚠️ {e(short(x, 80))}" for x in feed.get("errors", [])]
+          for name in ("hf", "breakout", "sitemap", "feed"):
+              if data.get(name, {}).get("error"):
+                  problems.append(f"⚠️ {name}:{e(short(data[name]['error'], 60))}")
+          if problems:
+              sections.append(["<b>数据源异常</b>\n" + "\n".join(problems)])
+
+          # Telegram takes 4096 characters a message (counted without the tags): chunks go together while
+          # they fit, and a section starts a new message when the one before is already half full.
+          messages, cur = [], ""
+          for sec in sections:
+              if len(cur) > 2000:
+                  messages.append(cur)
+                  cur = ""
+              for chunk in sec:
+                  if cur and len(cur) + len(chunk) + 2 > 3900:
+                      messages.append(cur)
+                      cur = ""
+                  cur = f"{cur}\n\n{chunk}" if cur else chunk
+          if cur:
+              messages.append(cur)
+
+          def call(method, body, ctype):
+              req = urllib.request.Request(f"{api}/{method}", data=body, headers={"Content-Type": ctype})
+              try:
+                  with urllib.request.urlopen(req, timeout=60) as res:
+                      print(method, res.status)
+              except urllib.error.HTTPError as exc:   # the token stays out of the log
+                  raise SystemExit(f"Telegram {method} {exc.code}: {exc.read().decode('utf-8', 'replace')[:300]}")
+
+          for m in messages:
+              call("sendMessage", json.dumps({"chat_id": chat, "text": m, "parse_mode": "HTML",
+                                              "disable_web_page_preview": True}).encode(), "application/json")
+
+          # Last, the whole report with every table, as a file.
+          page = ('<!doctype html><html><head><meta charset="utf-8">'
+                  '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                  f'<title>新词雷达 {day:%Y-%m-%d}</title></head><body style="margin:12px">'
+                  f'{notify.html(md)}</body></html>')
+          b = uuid.uuid4().hex
+          form = (f'--{b}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n{chat}\r\n'
+                  f'--{b}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n📎 完整表单:所有板块的全部表格\r\n'
+                  f'--{b}\r\nContent-Disposition: form-data; name="document"; filename="radar-{day:%Y-%m-%d}.html"\r\n'
+                  f'Content-Type: text/html\r\n\r\n').encode() + page.encode() + f'\r\n--{b}--\r\n'.encode()
+          call("sendDocument", form, f"multipart/form-data; boundary={b}")
+          EOF
 
       - name: Save the state
         if: always()

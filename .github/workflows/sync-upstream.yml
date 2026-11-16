@@ -1,0 +1,37 @@
+name: Sync with the original project
+
+# Run by hand (Actions > Sync with the original project > Run workflow) to merge the latest
+# zhuyansen/new-term-radar into this repository. Your config.json and radar.yml are kept:
+# the original project has no config.json, and a change it makes to radar.yml that clashes
+# with yours stops the merge and changes nothing.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge the original project
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/zhuyansen/new-term-radar.git
+          git fetch upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already up to date with the original project."; exit 0
+          fi
+          if ! git merge --no-edit upstream/main; then
+            git merge --abort || true
+            echo "::error::The original project changed the same lines as you did. Nothing was changed; ask for help with the merge."
+            exit 1
+          fi
+          git push origin HEAD
+          echo "Merged: $(git log -1 --format=%s upstream/main)"
