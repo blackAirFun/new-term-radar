@@ -33,5 +33,15 @@
   "tutorials": {"max_leads": 0},
   "feeds": {"enabled": ["producthunt", "hn", "openrouter", "civitai", "appstore", "awesome"]},
 
-  "gsc": {}
+  "gsc": {},
+  "editor": {
+    "top": 3,
+    "min_score": 2.4,
+    "pool_days": 7
+  },
+  "llm": {
+    "base_url": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat",
+    "key_env": "LLM_API_KEY"
+  }
 }

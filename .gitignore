@@ -12,3 +12,6 @@ __pycache__/
 build/
 dist/
 .DS_Store
+draft/*.json
+draft/*.html
+draft/*.txt
