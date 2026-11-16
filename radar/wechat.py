@@ -107,6 +107,81 @@ def html(draft: dict) -> str:
     return "\n".join(out)
 
 
+TOOLBAR_JS = """
+<script>
+(function () {
+  var btn = document.getElementById('copyBtn');
+  var msg = document.getElementById('msg');
+  var box = document.getElementById('content');
+  function say(t) { msg.textContent = t; }
+  btn.addEventListener('click', function () {
+    var sel = window.getSelection();
+    var range = document.createRange();
+    range.selectNodeContents(box);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    sel.removeAllRanges();
+    if (ok) { say('已复制，去公众号编辑器按 Cmd+V 粘贴'); return; }
+    // file:// 下 execCommand 偶尔被拒，再试一次剪贴板 API（需要 https 或 localhost）
+    var html = box.innerHTML, text = box.innerText;
+    if (navigator.clipboard && window.ClipboardItem) {
+      navigator.clipboard.write([new ClipboardItem({
+        'text/html': new Blob([html], { type: 'text/html' }),
+        'text/plain': new Blob([text], { type: 'text/plain' })
+      })]).then(function () { say('已复制，去公众号编辑器按 Cmd+V 粘贴'); })
+        .catch(function () { say('自动复制被浏览器拒绝：请点正文任意处，Cmd+A 全选、Cmd+C 复制'); });
+    } else {
+      say('自动复制不可用：请点正文任意处，Cmd+A 全选、Cmd+C 复制');
+    }
+  });
+})();
+</script>
+"""
+
+
+def preview(draft: dict, title: str | None = None) -> str:
+    """完整网页：手机宽度预览 + 顶部「复制全文」按钮。
+
+    为什么要这个：公众号编辑器要的是**带行内样式的富文本**。直接复制 .html 文件的源码是没用的，
+    必须先让浏览器渲染一遍再复制。这个页面把渲染和复制合成一步，点一下按钮就等于 Cmd+A、Cmd+C。
+    """
+    head = title or f"草稿 {draft['date']}"
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{escape(head)}</title>
+<style>
+  body {{ margin:0; background:#eef0f2; font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif; }}
+  .bar {{ position:sticky; top:0; z-index:9; display:flex; align-items:center; gap:10px; padding:10px 14px;
+          background:#fff; border-bottom:1px solid #e3e6e8; box-shadow:0 1px 4px rgba(0,0,0,.04); }}
+  .bar button {{ border:0; border-radius:6px; padding:9px 16px; font-size:14px; font-weight:600;
+                 color:#fff; background:#0b7a5a; cursor:pointer; }}
+  .bar button:active {{ background:#096349; }}
+  #msg {{ font-size:12px; color:#8a8a8a; }}
+  main {{ padding:18px 12px 60px; }}
+  .phone {{ max-width:420px; margin:0 auto; background:#fff; border-radius:10px; padding:20px 18px;
+            box-shadow:0 2px 12px rgba(0,0,0,.06); }}
+  @media (max-width:480px) {{ .phone {{ border-radius:0; box-shadow:none; padding:16px 14px; }} main {{ padding:0 0 40px; }} }}
+</style>
+</head>
+<body>
+<div class="bar">
+  <button id="copyBtn">复制全文（带排版）</button>
+  <span id="msg">点按钮，然后到公众号编辑器 ⌘V</span>
+</div>
+<main><div class="phone" id="content">
+{html(draft)}
+</div></main>
+{TOOLBAR_JS}
+</body>
+</html>
+"""
+
+
 def text(draft: dict) -> str:
     """纯文本备份：贴到知乎、社群、或者微信失败时用。"""
     lines = [f"AI 新东西 · {draft['date']}", ""]
@@ -131,13 +206,14 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m radar.wechat", description="草稿 → 公众号可粘贴 HTML")
     p.add_argument("--draft", required=True)
     p.add_argument("--out", help="不给就打到屏幕")
+    p.add_argument("--preview", action="store_true", help="出完整网页（带「复制全文」按钮），双击就能用")
     args = p.parse_args(argv)
     draft = json.load(open(args.draft, encoding="utf-8"))
-    page = html(draft)
+    page = preview(draft) if args.preview else html(draft)
     if args.out:
         Path(args.out).write_text(page, encoding="utf-8")
         Path(args.out).with_suffix(".txt").write_text(text(draft), encoding="utf-8")
-        print(f"写出 {args.out}（HTML，复制全文粘进公众号编辑器）")
+        print(f"写出 {args.out}" + ("（预览页：双击打开，点「复制全文」）" if args.preview else "（片段 HTML）"))
     else:
         print(page)
     return 0

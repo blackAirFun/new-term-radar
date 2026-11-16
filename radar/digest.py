@@ -98,6 +98,8 @@ def run(report_path: Path, state: Path, config_path: Path, out_dir: Path,
     stem.with_suffix(".json").write_text(json.dumps(draft, ensure_ascii=False, indent=1), encoding="utf-8")
     stem.with_suffix(".md").write_text(editor.markdown(draft), encoding="utf-8")
     stem.with_suffix(".html").write_text(wechat.html(draft), encoding="utf-8")
+    preview_path = stem.with_name(stem.name + ".preview.html")
+    preview_path.write_text(wechat.preview(draft), encoding="utf-8")
     stem.with_suffix(".txt").write_text(wechat.text(draft), encoding="utf-8")
 
     st = draft["stats"]
@@ -113,7 +115,8 @@ def run(report_path: Path, state: Path, config_path: Path, out_dir: Path,
             print(f"    {card['one_line']}")
     for w in draft["warnings"]:
         print(f"  ⚠️ {w}")
-    print(f"\n写出：{stem}.json / .md / .html / .txt")
+    print(f"\n写出：{stem}.json / .md / .html / .preview.html / .txt")
+    print(f"发布：用浏览器打开 {preview_path.name}，点「复制全文」，到公众号编辑器 ⌘V")
     return draft
 
 
