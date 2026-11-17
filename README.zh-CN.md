@@ -280,6 +280,22 @@ python -m radar daily --skip x,hf --out report.md  # 其余全部，每天一次
 
 `daily` 还会在 Markdown 旁边写一份 `report.json`，包含生成报告用到的全部数据。
 
+## 微信公众号日报 V1.1
+
+用已有的 Radar 报告生成审稿稿：
+
+```bash
+python -m radar.digest --report report.json --state state --out draft
+```
+
+编辑器先筛选候选并按读者价值排序，再核对 GitHub 仓库和 README，记录来源与核实时间。只有资料和中文改写都通过检查的项目才能进入正文。中文源抓取失败时，已有的报道记录仍然有效，未检出的项目按时间差未知处理。
+
+- `YYYY-MM-DD.preview.html` 提供审稿状态、三种标题和正文预览。`YYYY-MM-DD.html` 和 `YYYY-MM-DD.txt` 是正文备份。
+- `YYYY-MM-DD.titles.txt` 列出三种候选标题。`YYYY-MM-DD.links.html` 和 `YYYY-MM-DD.links.txt` 索引正文中的项目。
+- `YYYY-MM-DD.json` 和 `YYYY-MM-DD.md` 提供审稿数据。`blocked` 表示自动检查未通过，`needs_human_review` 表示自动检查通过、仍待人工核对项目资料和文案。
+
+GitHub Actions 使用内置的 `GITHUB_TOKEN` 读取仓库资料，使用已有的 `LLM_API_KEY` 生成中文稿，并将这些文件保存为 `draft-<run_id>` 产物。调试时可用 `--offline --no-cn` 跳过实时查询。发布前人工选择标题、核对正文并在公众号后台预览。如果需要通过「阅读原文」提供项目索引，需先将索引 HTML 托管到 HTTPS 地址。
+
 ## config.json
 
 | 字段 | 含义 |

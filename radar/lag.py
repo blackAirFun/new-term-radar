@@ -2,18 +2,19 @@
 
 三个数字
 --------
-  t_en   英文首现日。GitHub 仓库用它的**创建日**（report.json 里的 age_days 反推，这是最接近
-         "这个名字第一次出现在世界上"的时间）；Hugging Face、Product Hunt、Show HN、App Store
+  t_en   英文观测日期。GitHub 仓库用创建日（由 report.json 里的 age_days 反推）；
+         Hugging Face、Product Hunt、Show HN、App Store
          用**首次进入榜/首次被看到**的那天（就是这次运行的日子）。
   t_cn   中文首现日。中文科技媒体的标题里第一次出现这个名字的那天，由 cn_feeds 的语料给出。
-  ahead  你已经领先多少天 = 今天 − t_en。
+  ahead  英文观测距今天的天数。
 
 判定的四种状态（给编辑层决定"还值不值得写"）
 --------------------------------------------
-  cn_uncovered  中文圈还没人写        → 最值得写，你是第一个讲的
-  cn_late       中文比英文晚 ≥3 天    → 值得写，中文圈反应慢
-  cn_same       中文在 2 天内跟上     → 降级为速览，大家都写了
-  cn_early      中文先出现            → 反向信号：这东西可能起于中文圈
+  cn_uncovered  本次监测完整，已监测来源中未检出
+  unknown       本次监测不完整，历史记录无命中
+  cn_late       观测到的中文记录比英文晚 3 天或以上
+  cn_same       观测到的中文记录比英文晚 0 到 2 天
+  cn_early      观测到的中文记录比英文早
 
 用法
 ----
@@ -68,7 +69,8 @@ def record(conn: sqlite3.Connection, term: str, lang: str, day: str | date,
     conn.commit()
 
 
-def relate(conn: sqlite3.Connection, term: str, today: date | None = None) -> dict:
+def relate(conn: sqlite3.Connection, term: str, today: date | None = None, *,
+           cn_complete: bool = False) -> dict:
     """这个名字的时间差。缺任何一边都照样返回，只是对应字段为 None。"""
     today = today or date.today()
     rows = conn.execute("SELECT lang, day, source, url FROM seen WHERE term = ?", (term.strip().lower(),)).fetchall()
@@ -85,29 +87,30 @@ def relate(conn: sqlite3.Connection, term: str, today: date | None = None) -> di
         return out
     out["ahead"] = (today - t_en).days
     if t_cn is None:
-        out.update(state="cn_uncovered", note=f"中文圈未覆盖，已领先 {out['ahead']} 天")
+        if cn_complete:
+            out.update(state="cn_uncovered", note="本次监测的中文来源中暂未检出相关记录")
+        else:
+            out["note"] = "本次中文来源监测不完整，时间差未知"
         return out
     lag = (t_cn - t_en).days
     out["lag"] = lag
     if lag < 0:
-        out.update(state="cn_early", note=f"中文比英文早 {-lag} 天，可能起于中文圈")
+        out.update(state="cn_early", note=f"已记录的中文报道早 {-lag} 天（{cn['source']}）")
     elif lag <= SAME_DAYS:
         out.update(state="cn_same", note=f"中文 {lag} 天内已跟上（{cn['source']}）")
-    elif lag < LATE_DAYS:
-        out.update(state="cn_late", note=f"中文晚 {lag} 天（{cn['source']}）")
     else:
-        out.update(state="cn_late", note=f"中文晚 {lag} 天，还来得及（{cn['source']}）")
+        out.update(state="cn_late", note=f"已记录的中文报道晚 {lag} 天（{cn['source']}）")
     return out
 
 
 def bonus(rel: dict) -> float:
-    """给打分用：越早越加分，中文已覆盖就减分。"""
-    return {"cn_uncovered": 0.6, "cn_late": 0.3, "cn_early": 0.2, "cn_same": -0.5, "cn_only": 0.0,
+    """给打分用；未检出时不加分。"""
+    return {"cn_uncovered": 0.0, "cn_late": 0.3, "cn_early": 0.2, "cn_same": -0.5, "cn_only": 0.0,
             "unknown": 0.0}.get(rel.get("state", "unknown"), 0.0)
 
 
 def stats(conn: sqlite3.Connection) -> dict:
-    """累计指标：有多少名字中文圈覆盖了，覆盖的晚几天。这是"领先天数"的账本。"""
+    """累计已记录的中文命中及其观测时间差。"""
     rows = conn.execute("SELECT term, lang, day FROM seen").fetchall()
     by: dict[str, dict[str, str]] = {}
     for term, lang, day in rows:
@@ -118,7 +121,7 @@ def stats(conn: sqlite3.Connection) -> dict:
     return {
         "names": len(by),
         "cn_covered": len(both),
-        "cn_uncovered": sum(1 for v in by.values() if "en" in v and "cn" not in v),
+        "cn_no_record": sum(1 for v in by.values() if "en" in v and "cn" not in v),
         "median_lag": lags[len(lags) // 2] if lags else None,
         "covered_within_same": sum(1 for l in lags if l <= SAME_DAYS),
         "late": sum(1 for l in lags if l >= LATE_DAYS),

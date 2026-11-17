@@ -85,14 +85,15 @@ jobs:
           fi
           if [ -f report.md ]; then cat report.md >> "$GITHUB_STEP_SUMMARY"; fi
 
-      # 公众号草稿：过滤 + 打分 + 改写 + 时间差。失败不影响当天的雷达结果。
+      # 公众号审稿：候选核实、中文编辑、预览和链接索引。
       - name: Edit the day's draft
+        continue-on-error: true
         env:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           if [ -f report.json ]; then
-            python -m radar.digest --report report.json --state state --out draft || true
-            ls -la draft || true
+            python -m radar.digest --report report.json --state state --out "$RUNNER_TEMP/wechat-draft"
           fi
 
       # Telegram instead of mail: the day's highlights and each signal as cards with links, in as
@@ -349,5 +350,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: draft-${{ github.run_id }}
-          path: draft/
+          path: ${{ runner.temp }}/wechat-draft/
+          if-no-files-found: ignore
           retention-days: 30

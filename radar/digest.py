@@ -1,51 +1,24 @@
-"""一天的活：抓中文源 → 记首现 → 编辑成卡片 → 出三个文件（JSON / Markdown / 公众号 HTML）。
-
-它不改上游的任何模块，只在 report.json 之后接一段自己的流程，所以上游升级、你 rebase，都不用
-改这里的东西（除非 report.json 的结构变了）。
-
-  report.json ──► 候选 ──► 硬过滤 ──► 同族合并 ──► 打分 ──┬──► 模型改写 ──► 候选池 ──► 今日 3 条
-                                                            │
-        中文 RSS ──► 中文语料库 ───────────────────────────┘（时间差加成）
-                                                            │
-                                  draft/2026-11-16.json ────┴──► .md（审稿）/ .html（粘贴）
-
-用法
-----
-  # 每天跑完 radar daily 之后（同一目录）
-  python -m radar.digest --report report.json --state state --out draft
-
-  # 第一次：不配模型，只看过滤和打分干不干净
-  python -m radar.digest --report report.json --offline
-
-  # 不抓中文源（离线调试 / 网络被墙时）
-  python -m radar.digest --no-cn
-
-退出码一直是 0：这一层失败不该让当天的雷达结果丢失，错误写在 stdout 和 draft 的 warnings 里。
-"""
+"""将 Radar 的 report.json 生成公众号审稿稿、正文、标题和项目链接索引。"""
 from __future__ import annotations
 
 import json
-import re
 import sys
+from contextlib import closing
 from datetime import date, timedelta
 from pathlib import Path
 
-from . import cn_feeds, editor, lag, wechat
-
-
-def _norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+from . import cn_feeds, editor, lag, publication, wechat
 
 
 def _variants(report: dict) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for r in report.get("leads", []):
-        out[_norm(r.get("term", ""))] = list(r.get("variants") or [])
+        out[editor._name_key(r.get("term") or "")] = list(r.get("variants") or [])
     return out
 
 
 def _record_english(conn, cands: list[dict], today: date) -> None:
-    """英文侧的首现日：仓库用创建日（最接近「这名字第一次出现在世界上」），榜单用今天。"""
+    """记录英文侧观测日期，GitHub 项目用仓库创建日，榜单用当日。"""
     for c in cands:
         ev = c.get("evidence") or {}
         if c["source"] == "github" and ev.get("age_days"):
@@ -56,43 +29,55 @@ def _record_english(conn, cands: list[dict], today: date) -> None:
 
 
 def run(report_path: Path, state: Path, config_path: Path, out_dir: Path,
-        offline: bool = False, no_cn: bool = False, today: date | None = None) -> dict:
+        offline: bool = False, no_cn: bool = False, today: date | None = None, *,
+        top: int | None = None) -> dict:
     today = today or date.today()
     cfg = editor.load_cfg(config_path)
+    if top is not None:
+        cfg["top"] = top
+    report = json.loads(report_path.read_text(encoding="utf-8"))
     state.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     errors: list[str] = []
-    corpus = cn_feeds.Corpus(state)
+    cn_complete = False
     if not no_cn:
         try:
             rep = cn_feeds.update(state)
-            corpus = cn_feeds.Corpus(state)
+            cn_complete = bool(rep["feeds"]) and not rep["errors"]
+            errors.extend(f"中文源：{error}" for error in rep["errors"])
             print(f"中文源：新增 {rep['added']} 条" + (f"，{len(rep['errors'])} 个源失败" if rep["errors"] else ""))
         except Exception as exc:                      # noqa: BLE001 — 抓不到中文源也要出稿
             errors.append(f"中文源失败：{type(exc).__name__}: {str(exc)[:80]}")
-    print(f"中文语料库：{len(corpus)} 条")
+    try:
+        corpus = cn_feeds.Corpus(state)
+    except Exception as exc:                          # noqa: BLE001 — 保留编辑及已有时间差记录
+        corpus = None
+        errors.append(f"中文语料库读取失败：{type(exc).__name__}")
+    corpus_size = len(corpus) if corpus is not None else 0
+    cn_complete = cn_complete and corpus_size > 0
+    print(f"中文语料库：{corpus_size} 条")
 
-    report = json.load(open(report_path, encoding="utf-8"))
-    cands = editor.candidates(report)
-    conn = lag.connect(state)
-    _record_english(conn, cands, today)
     variants = _variants(report)
+    with closing(lag.connect(state)) as conn:
+        _record_english(conn, editor.candidates(report), today)
 
-    def lag_fn(term: str) -> dict:
-        if not len(corpus):
-            rel = lag.relate(conn, term)
-            rel.update(state="unknown", note="中文源没抓到，时间差未知")
-            return rel
-        hit = corpus.match(term, variants.get(_norm(term), []))
-        if hit:
-            lag.record(conn, term, "cn", hit["published"], hit["source"], hit["url"])
-        return lag.relate(conn, term)
+        def lag_fn(term: str) -> dict:
+            aliases = variants.get(editor._name_key(term)) or []
+            hit = corpus.match(term, aliases) if corpus else None
+            if hit:
+                lag.record(conn, term, "cn", hit["published"], hit["source"], hit["url"])
+            searchable = any(cn_feeds.tokens(name) for name in [term, *aliases])
+            relation = lag.relate(conn, term, today, cn_complete=cn_complete and searchable)
+            if cn_complete and not searchable and relation["state"] == "unknown":
+                relation["note"] = "名称缺少可匹配的词，时间差未知"
+            return relation
 
-    draft = editor.build(report, state, cfg, today=today, offline=offline, lag_fn=lag_fn)
+        draft = editor.build(report, state, cfg, today=today, offline=offline, lag_fn=lag_fn)
+        draft["stats"]["lag"] = lag.stats(conn)
     draft["warnings"] = (draft.get("warnings") or []) + errors
-    draft["stats"]["cn_corpus"] = len(corpus)
-    draft["stats"]["lag"] = lag.stats(conn)
+    draft["stats"]["cn_corpus"] = corpus_size
+    draft["stats"]["cn_complete"] = cn_complete
 
     stem = out_dir / f"{today.isoformat()}"
     stem.with_suffix(".json").write_text(json.dumps(draft, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -101,13 +86,16 @@ def run(report_path: Path, state: Path, config_path: Path, out_dir: Path,
     preview_path = stem.with_name(stem.name + ".preview.html")
     preview_path.write_text(wechat.preview(draft), encoding="utf-8")
     stem.with_suffix(".txt").write_text(wechat.text(draft), encoding="utf-8")
+    stem.with_suffix(".titles.txt").write_text(publication.titles_txt(draft), encoding="utf-8")
+    stem.with_suffix(".links.txt").write_text(publication.links_txt(draft), encoding="utf-8")
+    stem.with_suffix(".links.html").write_text(publication.links_html(draft), encoding="utf-8")
 
     st = draft["stats"]
     print(f"\n候选 {st['candidates']} → 留下 {st['kept']} → 丢弃 {st['dropped']} → 卡片 {st['cards']} → 池中 {st['pooled']}")
     ls = st["lag"]
     if ls.get("names"):
         med = f"{ls['median_lag']} 天" if ls.get("median_lag") is not None else "—（还没有两边都出现的名字）"
-        print(f"时间差账本：{ls['names']} 个名字，中文覆盖 {ls['cn_covered']} 个，未覆盖 {ls['cn_uncovered']} 个，中位时间差 {med}")
+        print(f"观测记录：{ls['names']} 个名字，已记录中文命中 {ls['cn_covered']} 个，中位时间差 {med}")
     for card in [draft.get("lead")] + (draft.get("worth") or []):
         if card:
             print(f"  ★ {card['name']:<28} {card['score']:<5} {'/'.join(str(card[k]) for k in ('usable','fresh','buzz'))}"
@@ -115,8 +103,8 @@ def run(report_path: Path, state: Path, config_path: Path, out_dir: Path,
             print(f"    {card['one_line']}")
     for w in draft["warnings"]:
         print(f"  ⚠️ {w}")
-    print(f"\n写出：{stem}.json / .md / .html / .preview.html / .txt")
-    print(f"发布：用浏览器打开 {preview_path.name}，点「复制全文」，到公众号编辑器 ⌘V")
+    print(f"\n写出：{stem}.json / .md / .html / .preview.html / .txt / .titles.txt / .links.txt / .links.html")
+    print(f"审稿状态：{draft['review_status']}，审稿预览见 {preview_path}")
     return draft
 
 
@@ -128,21 +116,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--state", default="state")
     p.add_argument("--config", default="config.json")
     p.add_argument("--out", default="draft", help="输出的目录")
-    p.add_argument("--offline", action="store_true", help="不调用模型（只看过滤/打分）")
+    p.add_argument("--offline", action="store_true", help="跳过模型和 GitHub 实时核实，可用缓存")
     p.add_argument("--no-cn", action="store_true", help="不抓中文 RSS")
     p.add_argument("--top", type=int, help="今天推几条（覆盖 config.json 的 editor.top）")
     args = p.parse_args(argv)
-    if args.top:
-        raw = json.load(open(args.config, encoding="utf-8")) if Path(args.config).exists() else {}
-        raw.setdefault("editor", {})["top"] = args.top
-        # 用临时文件承载覆盖值，避免改动用户的 config.json
-        tmp = Path(".digest-config.json")
-        tmp.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
-        args.config = str(tmp)
+    if args.top is not None and args.top < 1:
+        p.error("--top 必须大于 0")
     run(Path(args.report), Path(args.state), Path(args.config), Path(args.out),
-        offline=args.offline, no_cn=args.no_cn)
-    if args.top:
-        Path(".digest-config.json").unlink(missing_ok=True)
+        offline=args.offline, no_cn=args.no_cn, top=args.top)
     return 0
 
 

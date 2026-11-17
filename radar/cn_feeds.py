@@ -1,17 +1,11 @@
-"""中文语料：抓中文科技媒体的 RSS，回答一个问题——「这个名字，中文圈讲过了吗，哪天讲的」。
-
-为什么要有它
-------------
-上游的信号（GitHub / Hugging Face / Product Hunt / HN / App Store）全是英文源。一个名字在英文
-源出现之后，中文媒体通常要 3 到 7 天才写。这段时间差就是内容的价值所在：早了才有信息差。
+"""中文语料：抓取配置的中文科技媒体 RSS，记录观察范围内最早的标题命中。
 
 这个模块不负责「发现中文新词」，它只做两件事：
   1. update()  把中文源的标题存进 state/cn.db（去重，保留 60 天）；
   2. match()   判定一个英文候选名，在中文标题里有没有出现过、最早是哪天。
 
-判定规则（宁缺毋滥）：名字拆成 token（去掉 and/of 这类虚词），要求**所有 token 都出现**在同一
-条标题里；单字母和纯数字的 token 丢掉。这样 "pika h3 flex" 不会被 "h3" 一条命中，而
-"lfm3" 这种带数字的整体 token 能命中 "LiquidAI 发布 LFM3"。
+判定规则：去掉虚词后，同一条标题须包含名字或一个变体的所有词。
+英文按词匹配，中文按连续文字匹配。
 
 用法
 ----
@@ -142,6 +136,8 @@ def update(state: Path, feeds: list[dict] | None = None, keep_days: int = KEEP_D
     for f in feeds:
         try:
             got = items(_fetch(f["url"]))
+            if not got:
+                raise ValueError("未解析到可用的 RSS/Atom 条目")
         except Exception as exc:                    # noqa: BLE001 — 一个源坏了不能停
             report["feeds"][f["name"]] = {"error": f"{type(exc).__name__}: {str(exc)[:80]}"}
             report["errors"].append(f"{f['name']}: {str(exc)[:80]}")
@@ -161,14 +157,8 @@ def update(state: Path, feeds: list[dict] | None = None, keep_days: int = KEEP_D
 
 
 def tokens(term: str) -> list[str]:
-    out = []
-    for t in re.split(r"[^a-z0-9]+", term.lower()):
-        if not t or t in STOP_TOKENS:
-            continue
-        if len(t) < 2 or (t.isdigit() and len(t) < 3):
-            continue
-        out.append(t)
-    return out
+    parts = re.findall(r"[a-z0-9]+|[\u3400-\u9fff]+", term.casefold())
+    return [part for part in parts if len(part) >= 2 and not part.isdigit() and part not in STOP_TOKENS]
 
 
 class Corpus:
@@ -190,13 +180,15 @@ class Corpus:
 
         变体（比如 "niko strata" 的 "niko1221 strata"）一起试，取最早的。
         """
-        for cand in [term, *(variants or [])]:
-            toks = tokens(cand)
-            if not toks:
-                continue
-            hits = [r for r in self.rows if all(t in r["lower"] for t in toks)]
-            if hits:
-                return hits[0]          # rows 已按日期升序
+        patterns = []
+        for name in [term, *(variants or [])]:
+            words = tokens(name)
+            if words:
+                patterns.append([re.compile(rf"(?<![a-z0-9]){word}(?![a-z0-9])" if word.isascii() else word)
+                                 for word in words])
+        for row in self.rows:
+            if any(all(pattern.search(row["lower"]) for pattern in group) for group in patterns):
+                return row
         return None
 
 
