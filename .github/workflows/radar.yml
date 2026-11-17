@@ -62,12 +62,10 @@ jobs:
         env:
           T: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           C: ${{ secrets.TELEGRAM_CHAT_ID }}
-          L: ${{ secrets.LLM_API_KEY }}
         run: |
           check() { if [ -n "$2" ]; then echo "$1: set (${#2} chars)"; else echo "$1: MISSING"; fi; }
           check TELEGRAM_BOT_TOKEN "$T"
           check TELEGRAM_CHAT_ID "$C"
-          check LLM_API_KEY "$L"
 
       - name: Run the radar
         env:
@@ -84,16 +82,6 @@ jobs:
             python -m radar sources --out report.md
           fi
           if [ -f report.md ]; then cat report.md >> "$GITHUB_STEP_SUMMARY"; fi
-
-      # 公众号草稿：过滤 + 打分 + 改写 + 时间差。失败不影响当天的雷达结果。
-      - name: Edit the day's draft
-        env:
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-        run: |
-          if [ -f report.json ]; then
-            python -m radar.digest --report report.json --state state --out draft || true
-            ls -la draft || true
-          fi
 
       # Telegram instead of mail: the day's highlights and each signal as cards with links, in as
       # many messages as it takes, then the whole report with every table as an HTML file.
@@ -342,12 +330,4 @@ jobs:
             report.json
             state/radar.db
           if-no-files-found: ignore
-          retention-days: 30
-
-      - name: Keep the draft
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: draft-${{ github.run_id }}
-          path: draft/
           retention-days: 30
